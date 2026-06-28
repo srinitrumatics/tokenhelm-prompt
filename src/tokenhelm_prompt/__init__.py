@@ -45,7 +45,7 @@ from tokenhelm_prompt.tracking import (
     tracker,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0rc1"
 
 __all__ = [
     "__version__",
