@@ -1,48 +1,197 @@
-name: CI & Release
+name: Release
+
+# Staged release pipeline:
+#   tag vX.Y.Zrc1 -> build -> publish TestPyPI -> install from TestPyPI -> smoke -> prerelease
+#   tag vX.Y.Z    -> build -> publish PyPI     -> install from PyPI     -> smoke -> release
+# Publishing uses PyPI Trusted Publishing (OIDC) only — no API tokens anywhere.
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  # --------------------------------------------------------------------------
+  build:
+    name: Build & classify
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+    outputs:
+      version: ${{ steps.classify.outputs.version }}
+      is_tag: ${{ steps.classify.outputs.is_tag }}
+      is_prerelease: ${{ steps.classify.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
-      - name: Lint
-        run: ruff check src tests
-      - name: Test (coverage gate enforced via pyproject)
-        run: pytest
+          python-version: "3.12"
 
-  publish:
-    # Trusted Publishing to PyPI — no API token needed.
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
+      - name: Classify release from tag
+        id: classify
+        run: |
+          ref="${GITHUB_REF#refs/tags/}"
+          if [ "${GITHUB_REF}" = "refs/tags/${ref}" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            is_tag=true
+            version="${ref#v}"
+            # Final releases match X.Y.Z exactly; anything with a/b/rc/.dev suffix is a prerelease.
+            if echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              is_prerelease=false
+            else
+              is_prerelease=true
+            fi
+          else
+            is_tag=false
+            version=""
+            is_prerelease=false
+          fi
+          echo "is_tag=$is_tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$is_prerelease" >> "$GITHUB_OUTPUT"
+          echo "Classified ref='$GITHUB_REF' -> is_tag=$is_tag version=$version is_prerelease=$is_prerelease"
+
+      - name: Guard — tag version matches package version
+        if: steps.classify.outputs.is_tag == 'true'
+        run: |
+          pkg=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          tag="${{ steps.classify.outputs.version }}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::Tag version ($tag) does not match pyproject version ($pkg). Bump pyproject before tagging."
+            exit 1
+          fi
+          echo "Version guard OK: $pkg == $tag"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Twine check
+        run: python -m twine check dist/*
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # --------------------------------------------------------------------------
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: needs.build.outputs.is_tag == 'true' && needs.build.outputs.is_prerelease == 'true'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write   # OIDC — Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish (TestPyPI, Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  verify-testpypi:
+    name: Install & smoke (TestPyPI)
+    needs: [build, publish-testpypi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4   # for scripts/release_smoke_test.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fresh venv + install from TestPyPI
+        run: |
+          python -m venv /tmp/relenv
+          . /tmp/relenv/bin/activate
+          python -m pip install --upgrade pip
+          # Retry: the TestPyPI index can lag a few seconds after publish.
+          for attempt in 1 2 3 4 5 6; do
+            if python -m pip install \
+                --index-url https://test.pypi.org/simple \
+                --extra-index-url https://pypi.org/simple \
+                "tokenhelm-prompt==${{ needs.build.outputs.version }}"; then
+              break
+            fi
+            echo "install attempt $attempt failed; waiting for index..."
+            sleep 15
+          done
+      - name: Smoke test
+        run: |
+          . /tmp/relenv/bin/activate
+          python scripts/release_smoke_test.py
+
+  # --------------------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: needs.build.outputs.is_tag == 'true' && needs.build.outputs.is_prerelease == 'false'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write   # required for PyPI Trusted Publishing
+      id-token: write   # OIDC — Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish (PyPI, Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  verify-pypi:
+    name: Install & smoke (PyPI)
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build
+      - name: Fresh venv + install from PyPI
         run: |
-          python -m pip install --upgrade pip build
-          python -m build
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          python -m venv /tmp/relenv
+          . /tmp/relenv/bin/activate
+          python -m pip install --upgrade pip
+          for attempt in 1 2 3 4 5 6; do
+            if python -m pip install "tokenhelm-prompt==${{ needs.build.outputs.version }}"; then
+              break
+            fi
+            echo "install attempt $attempt failed; waiting for index..."
+            sleep 15
+          done
+      - name: Smoke test
+        run: |
+          . /tmp/relenv/bin/activate
+          python scripts/release_smoke_test.py
+
+  # --------------------------------------------------------------------------
+  github-release:
+    name: GitHub Release
+    needs: [build, verify-testpypi, verify-pypi]
+    # Run only after the relevant verification path has succeeded.
+    if: >-
+      ${{ !cancelled()
+          && needs.build.result == 'success'
+          && needs.build.outputs.is_tag == 'true'
+          && (needs.verify-testpypi.result == 'success' || needs.verify-pypi.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ needs.build.outputs.is_prerelease == 'true' }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
