@@ -121,6 +121,14 @@ jobs:
             echo "install attempt $attempt failed; waiting for index..."
             sleep 15
           done
+      - name: Verify imports + versions
+        run: |
+          . /tmp/relenv/bin/activate
+          python - <<'PY'
+          import tokenhelm, tokenhelm_prompt
+          print("tokenhelm:", tokenhelm.__version__)
+          print("tokenhelm_prompt:", tokenhelm_prompt.__version__)
+          PY
       - name: Smoke test
         run: |
           . /tmp/relenv/bin/activate
@@ -164,6 +172,14 @@ jobs:
             echo "install attempt $attempt failed; waiting for index..."
             sleep 15
           done
+      - name: Verify imports + versions
+        run: |
+          . /tmp/relenv/bin/activate
+          python - <<'PY'
+          import tokenhelm, tokenhelm_prompt
+          print("tokenhelm:", tokenhelm.__version__)
+          print("tokenhelm_prompt:", tokenhelm_prompt.__version__)
+          PY
       - name: Smoke test
         run: |
           . /tmp/relenv/bin/activate
