@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tokenhelm-prompt"
+version = "0.1.0"
+description = "Prompt attribution, versioning, analytics, and governance for TokenHelm — entirely additive."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "TokenHelm" }]
+dependencies = [
+    "tokenhelm>=0.1.0rc1",
+    "PyYAML>=6.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+langchain = ["langchain-core"]
+llamaindex = ["llama-index-core"]
+crewai = ["crewai"]
+adk = ["google-adk"]
+openai-agents = ["openai-agents"]
+haystack = ["haystack-ai"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pytest-benchmark>=4.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+tokenhelm-prompt = "tokenhelm_prompt.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=tokenhelm_prompt --cov-report=term-missing --cov-fail-under=95"
+
+[tool.coverage.run]
+branch = true
+source = ["tokenhelm_prompt"]
+omit = ["src/tokenhelm_prompt/integrations/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
